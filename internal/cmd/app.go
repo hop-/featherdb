@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"github.com/hop-/featherdb/internal/app"
 	"github.com/hop-/featherdb/internal/config"
 	"github.com/spf13/cobra"
 )
@@ -35,5 +36,28 @@ func setAllFlagsToCmd(cmd *cobra.Command) {
 }
 
 func executeApp() {
+	application, err := buildApp()
+	if err != nil {
+		// TODO: handle error appropriately
+		return
+	}
 
+	err = application.Start()
+	if err != nil {
+		// TODO: handle error appropriately
+		return
+	}
+
+	defer func() {
+		err := application.Stop()
+		if err != nil {
+			// TODO: handle error appropriately
+		}
+	}()
+}
+
+func buildApp() (*app.App, error) {
+	builder := app.NewBuilder()
+
+	return builder.Build()
 }
