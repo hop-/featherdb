@@ -1,0 +1,7 @@
+.env
+.idea
+__debug_bin*
+build
+bin
+featherdb
+.featherdb
