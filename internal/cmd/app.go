@@ -1,8 +1,8 @@
 package cmd
 
 import (
-	"github.com/hop-/featherdb/internal/app"
-	"github.com/hop-/featherdb/internal/config"
+	"github.com/hop-/cachydb/internal/app"
+	"github.com/hop-/cachydb/internal/config"
 	"github.com/spf13/cobra"
 )
 

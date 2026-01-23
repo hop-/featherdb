@@ -3,7 +3,7 @@ package cmd
 import (
 	"os"
 
-	"github.com/hop-/featherdb/internal/config"
+	"github.com/hop-/cachydb/internal/config"
 	"github.com/spf13/cobra"
 )
 

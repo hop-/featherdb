@@ -10,7 +10,7 @@ import (
 type Config struct {
 	Port        int    `env:"PORT" default:"7601"`
 	RootDir     string `env:"ROOT_DIR" default:""`
-	RootDirName string `default:".featherdb"`
+	RootDirName string `default:".cachydb"`
 }
 
 var cfg Config

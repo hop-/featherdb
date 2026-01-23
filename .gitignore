@@ -3,5 +3,5 @@
 __debug_bin*
 build
 bin
-featherdb
-.featherdb
+cachydb
+.cachydb

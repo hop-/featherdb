@@ -1,5 +1,5 @@
 package config
 
 func init() {
-	windowsRootDirName = "FeatherDB"
+	windowsRootDirName = "CachyDB"
 }

@@ -8,7 +8,7 @@ import (
 )
 
 var (
-	versionCmd     = &cobra.Command{
+	versionCmd = &cobra.Command{
 		Use:   "version",
 		Short: "Show the application version",
 		Long:  `Display the current version of the application.`,
@@ -23,7 +23,7 @@ func init() {
 }
 
 func showApplicationVersion() {
-	fmt.Printf("featherdb version %s\n", getVersion())
+	fmt.Printf("cachydb version %s\n", getVersion())
 }
 
 func getVersion() string {

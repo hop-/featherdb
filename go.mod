@@ -1,4 +1,4 @@
-module github.com/hop-/featherdb
+module github.com/hop-/cachydb
 
 go 1.25.5
 
