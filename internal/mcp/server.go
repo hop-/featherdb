@@ -29,14 +29,14 @@ func NewServer(defaultDBName, rootDir string) (*Server, error) {
 		return nil, fmt.Errorf("failed to load databases: %w", err)
 	}
 
+	// Start background storage syncer
+	storage.StartBackgroundSync(dbManager)
+
 	// Ensure default database exists
 	if dbManager.GetDatabase(defaultDBName) == nil {
-		db := dbManager.CreateDatabase(defaultDBName)
-		if err := storage.LogCreateDatabase(db.Name); err != nil {
+		defaultDB := dbManager.CreateDatabase(defaultDBName)
+		if err := storage.LogCreateDatabase(defaultDB.Name); err != nil {
 			return nil, fmt.Errorf("failed to log create database: %w", err)
-		}
-		if err := storage.SaveDatabase(db); err != nil {
-			return nil, fmt.Errorf("failed to create default database: %w", err)
 		}
 	}
 
@@ -217,20 +217,11 @@ func (s *Server) createDatabaseTool(
 	req *mcp.CallToolRequest,
 	input CreateDatabaseInput,
 ) (*mcp.CallToolResult, map[string]interface{}, error) {
-	database := s.dbManager.CreateDatabase(input.Name)
+	s.dbManager.CreateDatabase(input.Name)
 
-	// Log to WAL
+	// Log to WAL (sync) - storage save happens async in background
 	if err := s.storage.LogCreateDatabase(input.Name); err != nil {
 		return nil, nil, fmt.Errorf("failed to log create database: %w", err)
-	}
-
-	if err := s.storage.SaveDatabase(database); err != nil {
-		return nil, nil, fmt.Errorf("failed to save database: %w", err)
-	}
-
-	// Checkpoint after save
-	if err := s.storage.Checkpoint(); err != nil {
-		return nil, nil, fmt.Errorf("failed to checkpoint: %w", err)
 	}
 
 	return nil, map[string]interface{}{
@@ -261,18 +252,14 @@ func (s *Server) deleteDatabaseTool(
 		return nil, nil, fmt.Errorf("database '%s' not found", input.Name)
 	}
 
-	// Log to WAL
+	// Log to WAL (sync)
 	if err := s.storage.LogDeleteDatabase(input.Name); err != nil {
 		return nil, nil, fmt.Errorf("failed to log delete database: %w", err)
 	}
 
+	// Delete database files immediately (this is a destructive operation)
 	if err := s.storage.DeleteDatabase(input.Name); err != nil {
 		return nil, nil, fmt.Errorf("failed to delete database files: %w", err)
-	}
-
-	// Checkpoint after delete
-	if err := s.storage.Checkpoint(); err != nil {
-		return nil, nil, fmt.Errorf("failed to checkpoint: %w", err)
 	}
 
 	return nil, map[string]interface{}{
@@ -349,18 +336,9 @@ func (s *Server) createCollectionTool(
 		return nil, nil, err
 	}
 
-	// Log to WAL
+	// Log to WAL (sync) - storage save happens async in background
 	if err := s.storage.LogCreateCollection(database.Name, input.Name, schema); err != nil {
 		return nil, nil, fmt.Errorf("failed to log create collection: %w", err)
-	}
-
-	if err := s.storage.SaveDatabase(database); err != nil {
-		return nil, nil, err
-	}
-
-	// Checkpoint after save
-	if err := s.storage.Checkpoint(); err != nil {
-		return nil, nil, fmt.Errorf("failed to checkpoint: %w", err)
 	}
 
 	return nil, map[string]interface{}{
@@ -416,18 +394,9 @@ func (s *Server) insertDocumentTool(
 		return nil, nil, err
 	}
 
-	// Log to WAL
+	// Log to WAL (sync) - storage save happens async in background
 	if err := s.storage.LogInsert(database.Name, input.Collection, doc); err != nil {
 		return nil, nil, fmt.Errorf("failed to log insert: %w", err)
-	}
-
-	if err := s.storage.SaveCollection(database.Name, coll); err != nil {
-		return nil, nil, err
-	}
-
-	// Checkpoint after save
-	if err := s.storage.Checkpoint(); err != nil {
-		return nil, nil, fmt.Errorf("failed to checkpoint: %w", err)
 	}
 
 	return nil, map[string]interface{}{
@@ -527,18 +496,9 @@ func (s *Server) updateDocumentTool(
 		return nil, nil, fmt.Errorf("failed to get updated document: %w", err)
 	}
 
-	// Log to WAL
+	// Log to WAL (sync) - storage save happens async in background
 	if err := s.storage.LogUpdate(database.Name, input.Collection, updatedDoc); err != nil {
 		return nil, nil, fmt.Errorf("failed to log update: %w", err)
-	}
-
-	if err := s.storage.SaveCollection(database.Name, coll); err != nil {
-		return nil, nil, err
-	}
-
-	// Checkpoint after save
-	if err := s.storage.Checkpoint(); err != nil {
-		return nil, nil, fmt.Errorf("failed to checkpoint: %w", err)
 	}
 
 	return nil, map[string]interface{}{
@@ -566,18 +526,9 @@ func (s *Server) deleteDocumentTool(
 		return nil, nil, err
 	}
 
-	// Log to WAL
+	// Log to WAL (sync) - storage save happens async in background
 	if err := s.storage.LogDelete(database.Name, input.Collection, input.ID); err != nil {
 		return nil, nil, fmt.Errorf("failed to log delete: %w", err)
-	}
-
-	if err := s.storage.SaveCollection(database.Name, coll); err != nil {
-		return nil, nil, err
-	}
-
-	// Checkpoint after save
-	if err := s.storage.Checkpoint(); err != nil {
-		return nil, nil, fmt.Errorf("failed to checkpoint: %w", err)
 	}
 
 	return nil, map[string]interface{}{
@@ -605,18 +556,9 @@ func (s *Server) createIndexTool(
 		return nil, nil, err
 	}
 
-	// Log to WAL
+	// Log to WAL (sync) - storage save happens async in background
 	if err := s.storage.LogCreateIndex(database.Name, input.Collection, input.IndexName, input.FieldName); err != nil {
 		return nil, nil, fmt.Errorf("failed to log create index: %w", err)
-	}
-
-	if err := s.storage.SaveCollection(database.Name, coll); err != nil {
-		return nil, nil, err
-	}
-
-	// Checkpoint after save
-	if err := s.storage.Checkpoint(); err != nil {
-		return nil, nil, fmt.Errorf("failed to checkpoint: %w", err)
 	}
 
 	return nil, map[string]interface{}{

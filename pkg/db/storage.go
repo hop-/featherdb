@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
+	"time"
 )
 
 // StorageFormat represents the storage format type
@@ -13,13 +16,29 @@ type StorageFormat string
 const (
 	FormatJSON   StorageFormat = "json"
 	FormatBinary StorageFormat = "binary"
+
+	// StorageSyncInterval is how often to sync dirty data to storage
+	StorageSyncInterval = 5 * time.Second
 )
+
+// DirtyEntry tracks a dirty database/collection that needs to be saved
+type DirtyEntry struct {
+	Database   string
+	Collection string // empty means entire database
+	Timestamp  time.Time
+}
 
 // StorageManager handles persistence
 type StorageManager struct {
-	RootDir string
-	WAL     *WALManager
-	Format  StorageFormat // Default format for new data
+	RootDir    string
+	WAL        *WALManager
+	Format     StorageFormat // Default format for new data
+	dbManager  *DatabaseManager
+	dirty      map[string]*DirtyEntry // key: "db" or "db/collection"
+	dirtyMu    sync.Mutex
+	syncTicker *time.Ticker
+	stopChan   chan struct{}
+	wg         sync.WaitGroup
 }
 
 // NewStorageManager creates a new storage manager
@@ -33,15 +52,125 @@ func NewStorageManager(rootDir string) (*StorageManager, error) {
 		return nil, fmt.Errorf("failed to create WAL manager: %w", err)
 	}
 
-	return &StorageManager{
-		RootDir: rootDir,
-		WAL:     wal,
-		Format:  FormatBinary, // Use binary format by default
-	}, nil
+	sm := &StorageManager{
+		RootDir:    rootDir,
+		WAL:        wal,
+		Format:     FormatBinary, // Use binary format by default
+		dirty:      make(map[string]*DirtyEntry),
+		syncTicker: time.NewTicker(StorageSyncInterval),
+		stopChan:   make(chan struct{}),
+	}
+
+	return sm, nil
+}
+
+// StartBackgroundSync starts the background storage syncer
+// Must be called after LoadAllDatabases sets dbManager
+func (sm *StorageManager) StartBackgroundSync(dbManager *DatabaseManager) {
+	sm.dbManager = dbManager
+	sm.wg.Add(1)
+	go sm.backgroundStorageSyncer()
+}
+
+// backgroundStorageSyncer periodically saves dirty data to storage
+func (sm *StorageManager) backgroundStorageSyncer() {
+	defer sm.wg.Done()
+
+	for {
+		select {
+		case <-sm.stopChan:
+			// Final sync before shutdown
+			sm.syncDirtyToStorage()
+			return
+		case <-sm.syncTicker.C:
+			sm.syncDirtyToStorage()
+		}
+	}
+}
+
+// syncDirtyToStorage saves all dirty entries to storage and checkpoints
+func (sm *StorageManager) syncDirtyToStorage() {
+	sm.dirtyMu.Lock()
+	if len(sm.dirty) == 0 {
+		sm.dirtyMu.Unlock()
+		return
+	}
+
+	// Copy dirty entries
+	toSync := make(map[string]*DirtyEntry)
+	for k, v := range sm.dirty {
+		toSync[k] = v
+	}
+	sm.dirty = make(map[string]*DirtyEntry)
+	sm.dirtyMu.Unlock()
+
+	if sm.dbManager == nil {
+		return
+	}
+
+	// Save each dirty entry
+	for key, entry := range toSync {
+		var err error
+		if entry.Collection == "" {
+			// Save entire database
+			db := sm.dbManager.GetDatabase(entry.Database)
+			if db != nil {
+				err = sm.SaveDatabase(db)
+			}
+		} else {
+			// Save specific collection
+			db := sm.dbManager.GetDatabase(entry.Database)
+			if db != nil {
+				coll, cerr := db.GetCollection(entry.Collection)
+				if cerr == nil {
+					err = sm.SaveCollection(entry.Database, coll)
+				}
+			}
+		}
+		if err != nil {
+			// Re-add to dirty on failure
+			sm.dirtyMu.Lock()
+			sm.dirty[key] = entry
+			sm.dirtyMu.Unlock()
+			fmt.Printf("Failed to sync %s to storage: %v\n", key, err)
+		}
+	}
+
+	// Checkpoint after successful sync
+	if err := sm.Checkpoint(); err != nil {
+		fmt.Printf("Failed to checkpoint after storage sync: %v\n", err)
+	}
+}
+
+// MarkDirty marks a database or collection as needing to be saved
+func (sm *StorageManager) MarkDirty(dbName, collName string) {
+	sm.dirtyMu.Lock()
+	defer sm.dirtyMu.Unlock()
+
+	key := dbName
+	if collName != "" {
+		key = dbName + "/" + collName
+	}
+
+	sm.dirty[key] = &DirtyEntry{
+		Database:   dbName,
+		Collection: collName,
+		Timestamp:  time.Now(),
+	}
 }
 
 // Close closes the storage manager and flushes WAL
 func (sm *StorageManager) Close() error {
+	// Stop background syncer
+	if sm.stopChan != nil {
+		close(sm.stopChan)
+		sm.wg.Wait()
+	}
+	if sm.syncTicker != nil {
+		sm.syncTicker.Stop()
+	}
+
+	// Close WAL
 	if sm.WAL != nil {
 		return sm.WAL.Close()
 	}
@@ -308,8 +437,8 @@ func (sm *StorageManager) LoadAllDatabases() (*DatabaseManager, error) {
 	}
 
 	for _, entry := range entries {
-		// Skip the WAL directory
-		if entry.Name() == "wal" {
+		// Skip WAL files (wal-*.bin and wal.checkpoint)
+		if strings.HasPrefix(entry.Name(), WALFilePrefix) || entry.Name() == WALCheckpointFile {
 			continue
 		}
 
@@ -344,9 +473,9 @@ func (sm *StorageManager) SaveAllDatabases(dm *DatabaseManager) error {
 	return nil
 }
 
-// WAL Integration Methods
+// WAL Integration Methods (Sync writes for durability)
 
-// LogInsert logs an insert operation to WAL
+// LogInsert logs an insert operation to WAL (sync) and marks collection dirty
 func (sm *StorageManager) LogInsert(dbName, collName string, doc *Document) error {
 	docData, err := json.Marshal(doc)
 	if err != nil {
@@ -361,10 +490,15 @@ func (sm *StorageManager) LogInsert(dbName, collName string, doc *Document) erro
 		Data:       docData,
 	}
 
-	return sm.WAL.AppendEntry(entry)
+	if err := sm.WAL.AppendEntrySync(entry); err != nil {
+		return err
+	}
+
+	sm.MarkDirty(dbName, collName)
+	return nil
 }
 
-// LogUpdate logs an update operation to WAL
+// LogUpdate logs an update operation to WAL (sync) and marks collection dirty
 func (sm *StorageManager) LogUpdate(dbName, collName string, doc *Document) error {
 	docData, err := json.Marshal(doc)
 	if err != nil {
@@ -379,10 +513,15 @@ func (sm *StorageManager) LogUpdate(dbName, collName string, doc *Document) erro
 		Data:       docData,
 	}
 
-	return sm.WAL.AppendEntry(entry)
+	if err := sm.WAL.AppendEntrySync(entry); err != nil {
+		return err
+	}
+
+	sm.MarkDirty(dbName, collName)
+	return nil
 }
 
-// LogDelete logs a delete operation to WAL
+// LogDelete logs a delete operation to WAL (sync) and marks collection dirty
 func (sm *StorageManager) LogDelete(dbName, collName, docID string) error {
 	entry := &WALEntry{
 		Database:   dbName,
@@ -391,30 +530,40 @@ func (sm *StorageManager) LogDelete(dbName, collName, docID string) error {
 		DocumentID: docID,
 	}
 
-	return sm.WAL.AppendEntry(entry)
+	if err := sm.WAL.AppendEntrySync(entry); err != nil {
+		return err
+	}
+
+	sm.MarkDirty(dbName, collName)
+	return nil
 }
 
-// LogCreateDatabase logs a create database operation to WAL
+// LogCreateDatabase logs a create database operation to WAL (sync) and marks database dirty
 func (sm *StorageManager) LogCreateDatabase(dbName string) error {
 	entry := &WALEntry{
 		Database:  dbName,
 		Operation: WALOpCreateDatabase,
 	}
 
-	return sm.WAL.AppendEntry(entry)
+	if err := sm.WAL.AppendEntrySync(entry); err != nil {
+		return err
+	}
+
+	sm.MarkDirty(dbName, "")
+	return nil
 }
 
-// LogDeleteDatabase logs a delete database operation to WAL
+// LogDeleteDatabase logs a delete database operation to WAL (sync)
 func (sm *StorageManager) LogDeleteDatabase(dbName string) error {
 	entry := &WALEntry{
 		Database:  dbName,
 		Operation: WALOpDeleteDatabase,
 	}
 
-	return sm.WAL.AppendEntry(entry)
+	return sm.WAL.AppendEntrySync(entry)
 }
 
-// LogCreateCollection logs a create collection operation to WAL
+// LogCreateCollection logs a create collection operation to WAL (sync) and marks database dirty
 func (sm *StorageManager) LogCreateCollection(dbName, collName string, schema *Schema) error {
 	var schemaData []byte
 	var err error
@@ -432,10 +581,15 @@ func (sm *StorageManager) LogCreateCollection(dbName, collName string, schema *S
 		Data:       schemaData,
 	}
 
-	return sm.WAL.AppendEntry(entry)
+	if err := sm.WAL.AppendEntrySync(entry); err != nil {
+		return err
+	}
+
+	sm.MarkDirty(dbName, "")
+	return nil
 }
 
-// LogCreateIndex logs a create index operation to WAL
+// LogCreateIndex logs a create index operation to WAL (sync) and marks collection dirty
 func (sm *StorageManager) LogCreateIndex(dbName, collName, indexName, fieldName string) error {
 	indexData := map[string]string{
 		"index_name": indexName,
@@ -453,7 +607,12 @@ func (sm *StorageManager) LogCreateIndex(dbName, collName, indexName, fieldName 
 		Data:       data,
 	}
 
-	return sm.WAL.AppendEntry(entry)
+	if err := sm.WAL.AppendEntrySync(entry); err != nil {
+		return err
+	}
+
+	sm.MarkDirty(dbName, collName)
+	return nil
 }
 
 // Checkpoint creates a checkpoint in the WAL at the current offset

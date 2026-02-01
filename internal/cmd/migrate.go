@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/hop-/cachydb/pkg/db"
 	"github.com/spf13/cobra"
@@ -89,7 +90,8 @@ func runMigrate(cmd *cobra.Command, args []string) error {
 			}
 
 			for _, entry := range entries {
-				if entry.IsDir() && entry.Name() != "wal" {
+				// Skip WAL files and non-directories
+				if entry.IsDir() && !strings.HasPrefix(entry.Name(), db.WALFilePrefix) {
 					if err := migrator.CreateBackup(entry.Name()); err != nil {
 						fmt.Printf("Warning: backup failed for '%s': %v\n", entry.Name(), err)
 					}

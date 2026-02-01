@@ -328,10 +328,9 @@ Data is stored in `~/.cachydb/` (or custom `ROOT_DIR`):
 
 ```none
 .cachydb/
-├── wal/                       # Write-Ahead Log directory
-│   ├── wal-0000000001.log    # WAL file (current)
-│   ├── wal-0000000002.log    # WAL file (previous)
-│   └── wal.checkpoint        # Checkpoint tracking
+├── wal-0000000001.bin        # WAL file (current)
+├── wal-0000000002.bin        # WAL file (previous)
+├── wal.checkpoint            # Checkpoint tracking
 └── main/                      # Database name
     ├── db.meta.json          # Database metadata
     ├── users/                # Collection (binary format)

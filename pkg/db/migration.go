@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // MigrationManager handles migration from JSON to binary storage
@@ -88,7 +89,8 @@ func (mm *MigrationManager) MigrateAllDatabases() error {
 
 	migratedCount := 0
 	for _, entry := range entries {
-		if !entry.IsDir() || entry.Name() == "wal" {
+		// Skip WAL files and non-directories
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), WALFilePrefix) {
 			continue
 		}
 

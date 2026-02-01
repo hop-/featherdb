@@ -74,13 +74,13 @@ type WALManager struct {
 
 // NewWALManager creates a new WAL manager
 func NewWALManager(rootDir string) (*WALManager, error) {
-	walDir := filepath.Join(rootDir, "wal")
-	if err := os.MkdirAll(walDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create WAL directory: %w", err)
+	// WAL files are stored directly in rootDir (no separate wal subdirectory)
+	if err := os.MkdirAll(rootDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create data directory: %w", err)
 	}
 
 	wm := &WALManager{
-		rootDir:     walDir,
+		rootDir:     rootDir,
 		batch:       make([]*WALEntry, 0, WALBatchSize),
 		stopChan:    make(chan struct{}),
 		flushTicker: time.NewTicker(WALFlushInterval),
@@ -121,6 +121,40 @@ func (wm *WALManager) AppendEntry(entry *WALEntry) error {
 	// Flush if batch is full
 	if len(wm.batch) >= WALBatchSize {
 		return wm.flushBatchLocked()
+	}
+
+	return nil
+}
+
+// AppendEntrySync appends an entry to the WAL and flushes immediately (sync)
+// This ensures durability - when this returns, the entry is on disk
+func (wm *WALManager) AppendEntrySync(entry *WALEntry) error {
+	wm.batchMu.Lock()
+	defer wm.batchMu.Unlock()
+
+	// Assign offset
+	wm.mu.Lock()
+	entry.Offset = wm.currentOffset
+	wm.currentOffset++
+	wm.mu.Unlock()
+
+	entry.Timestamp = time.Now()
+
+	// Add to batch
+	wm.batch = append(wm.batch, entry)
+
+	// Flush immediately for sync write
+	if err := wm.flushBatchLocked(); err != nil {
+		return err
+	}
+
+	// Sync to disk for durability
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
+	if wm.currentFile != nil {
+		if err := wm.currentFile.Sync(); err != nil {
+			return fmt.Errorf("failed to sync WAL to disk: %w", err)
+		}
 	}
 
 	return nil
