@@ -20,6 +20,8 @@ var (
 
 func init() {
 	// No flags for version command
+
+	rootCmd.AddCommand(versionCmd)
 }
 
 func showApplicationVersion() {

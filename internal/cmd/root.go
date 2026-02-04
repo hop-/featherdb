@@ -20,22 +20,21 @@ var (
 
 // autorun: This function is called automatically to initialize the root command
 func init() {
+	config.Init()
+
 	// Flags for root command
 	setAllFlagsToCmd(rootCmd)
-
-	// Add subcommands
-	rootCmd.AddCommand(appCmd)
-	rootCmd.AddCommand(versionCmd)
 }
 
 func Execute() {
-	config.Init()
 
 	err := createRootDirIfNotExists()
 	if err != nil {
 		// TODO: handle error properly
 		panic(err)
 	}
+
+	// Execute the root command
 	cobra.CheckErr(rootCmd.Execute())
 }
 

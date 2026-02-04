@@ -2,8 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"os"
-	"strings"
 
 	"github.com/hop-/cachydb/pkg/db"
 	"github.com/spf13/cobra"
@@ -12,37 +10,60 @@ import (
 // migrateCmd represents the migrate command
 var migrateCmd = &cobra.Command{
 	Use:   "migrate",
-	Short: "Migrate databases from JSON to binary format",
-	Long: `Migrate existing JSON-based databases to the new binary storage format.
-This command will:
-1. Create a backup of the database
-2. Load data from JSON format
-3. Save data to binary format with compression
-4. Verify the migration was successful`,
+	Short: "Migrate databases to a specific schema version",
+	Long: `Migrate databases from their current schema version to a target version.
+The migration system applies schema updates iteratively.
+
+Each migration step is registered in code and can perform schema transformations,
+data migrations, or any other necessary updates.`,
 	RunE: runMigrate,
 }
 
 var (
 	migrateDatabase string
 	migrateAll      bool
-	skipBackup      bool
-	verifyOnly      bool
-	restoreBackup   bool
+	targetVersion   int
+	showVersion     bool
+	listMigrations  bool
 )
 
 func init() {
-	rootCmd.AddCommand(migrateCmd)
+	utilsCmd.AddCommand(migrateCmd)
 
-	migrateCmd.Flags().StringVarP(&migrateDatabase, "database", "d", "", "Database name to migrate (required unless --all is specified)")
+	migrateCmd.Flags().StringVarP(&migrateDatabase, "database", "d", "", "Database name to migrate")
 	migrateCmd.Flags().BoolVarP(&migrateAll, "all", "a", false, "Migrate all databases")
-	migrateCmd.Flags().BoolVar(&skipBackup, "skip-backup", false, "Skip creating backup before migration")
-	migrateCmd.Flags().BoolVar(&verifyOnly, "verify", false, "Only verify migration without migrating")
-	migrateCmd.Flags().BoolVar(&restoreBackup, "restore", false, "Restore database from backup")
+	migrateCmd.Flags().IntVarP(&targetVersion, "target", "t", db.CurrentSchemaVersion, "Target schema version (default: latest)")
+	migrateCmd.Flags().BoolVarP(&showVersion, "show-version", "v", false, "Show current schema version of database")
+	migrateCmd.Flags().BoolVarP(&listMigrations, "list", "l", false, "List all registered migrations")
 }
 
 func runMigrate(cmd *cobra.Command, args []string) error {
-	if !migrateAll && migrateDatabase == "" {
-		return fmt.Errorf("either --database or --all must be specified")
+	// List migrations (doesn't require storage)
+	if listMigrations {
+		migrator := db.NewMigrationManager(nil)
+		versions := migrator.ListMigrations()
+		if len(versions) == 0 {
+			fmt.Println("No migrations registered yet")
+			return nil
+		}
+		fmt.Println("Registered migrations:")
+		for _, version := range versions {
+			fmt.Printf("  Version %d -> %d\n", version, version+1)
+		}
+		fmt.Printf("\nCurrent schema version: %d\n", db.CurrentSchemaVersion)
+		return nil
+	}
+
+	// Show version requires database parameter
+	if showVersion {
+		if migrateDatabase == "" {
+			return fmt.Errorf("--database is required when using --show-version. Use 'cachydb utils list' to see available databases")
+		}
+	}
+
+	// Validate flags for migration operations
+	if !showVersion && !migrateAll && migrateDatabase == "" {
+		return fmt.Errorf("either --database or --all must be specified. Use 'cachydb utils list' to see available databases")
 	}
 
 	if migrateAll && migrateDatabase != "" {
@@ -58,69 +79,32 @@ func runMigrate(cmd *cobra.Command, args []string) error {
 
 	migrator := db.NewMigrationManager(storage)
 
-	// Handle restore
-	if restoreBackup {
-		if migrateDatabase == "" {
-			return fmt.Errorf("--database is required when using --restore")
+	// Show version
+	if showVersion {
+		version, err := migrator.GetDatabaseVersion(migrateDatabase)
+		if err != nil {
+			return fmt.Errorf("failed to get database version: %w", err)
 		}
-		fmt.Printf("Restoring database '%s' from backup...\n", migrateDatabase)
-		if err := migrator.RestoreBackup(migrateDatabase); err != nil {
-			return fmt.Errorf("restore failed: %w", err)
-		}
-		fmt.Println("Restore complete!")
+		fmt.Printf("Database '%s' is at schema version %d\n", migrateDatabase, version)
+		fmt.Printf("Current schema version: %d\n", db.CurrentSchemaVersion)
 		return nil
-	}
-
-	// Handle verify-only
-	if verifyOnly {
-		if migrateDatabase == "" {
-			return fmt.Errorf("--database is required when using --verify")
-		}
-		return migrator.VerifyMigration(migrateDatabase)
 	}
 
 	// Migrate all databases
 	if migrateAll {
-		if !skipBackup {
-			fmt.Println("Warning: Creating backups for all databases...")
-			// Get list of databases
-			entries, err := os.ReadDir(generalRootDir)
-			if err != nil {
-				return fmt.Errorf("failed to read data directory: %w", err)
-			}
-
-			for _, entry := range entries {
-				// Skip WAL files and non-directories
-				if entry.IsDir() && !strings.HasPrefix(entry.Name(), db.WALFilePrefix) {
-					if err := migrator.CreateBackup(entry.Name()); err != nil {
-						fmt.Printf("Warning: backup failed for '%s': %v\n", entry.Name(), err)
-					}
-				}
-			}
+		fmt.Printf("Migrating all databases to version %d...\n", targetVersion)
+		if err := migrator.MigrateAllDatabases(targetVersion); err != nil {
+			return fmt.Errorf("migration failed: %w", err)
 		}
-
-		return migrator.MigrateAllDatabases()
+		fmt.Println("All databases migrated successfully!")
+		return nil
 	}
 
 	// Migrate single database
-	if !skipBackup {
-		if err := migrator.CreateBackup(migrateDatabase); err != nil {
-			return fmt.Errorf("backup failed: %w", err)
-		}
-	}
-
-	if err := migrator.MigrateDatabase(migrateDatabase); err != nil {
+	if err := migrator.MigrateDatabase(migrateDatabase, targetVersion); err != nil {
 		return fmt.Errorf("migration failed: %w", err)
 	}
 
-	// Verify after migration
-	if err := migrator.VerifyMigration(migrateDatabase); err != nil {
-		return fmt.Errorf("verification failed: %w", err)
-	}
-
-	fmt.Println("\nMigration complete!")
-	fmt.Printf("To restore from backup if needed: %s migrate --database %s --restore\n",
-		os.Args[0], migrateDatabase)
-
+	fmt.Printf("Database '%s' migrated successfully!\n", migrateDatabase)
 	return nil
 }

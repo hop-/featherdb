@@ -495,8 +495,6 @@ func (wm *WALManager) Replay(dm *DatabaseManager, storage *StorageManager) error
 		return nil // Nothing to replay
 	}
 
-	fmt.Printf("Replaying %d WAL entries from offset %d\n", len(entries), checkpoint.Offset)
-
 	// Replay each entry
 	for _, entry := range entries {
 		if err := wm.replayEntry(entry, dm, storage); err != nil {
@@ -512,7 +510,6 @@ func (wm *WALManager) Replay(dm *DatabaseManager, storage *StorageManager) error
 		}
 	}
 
-	fmt.Printf("WAL replay complete\n")
 	return nil
 }
 

@@ -187,7 +187,8 @@ func (sm *StorageManager) SaveDatabase(db *Database) error {
 	// Save database metadata
 	metaPath := filepath.Join(dbDir, "db.meta.json")
 	metaData := map[string]any{
-		"name": db.Name,
+		"name":           db.Name,
+		"schema_version": db.SchemaVersion,
 	}
 	if err := sm.writeJSON(metaPath, metaData); err != nil {
 		return fmt.Errorf("failed to save database metadata: %w", err)
@@ -289,6 +290,35 @@ func (sm *StorageManager) LoadDatabase(dbName string) (*Database, error) {
 	}
 
 	db := NewDatabase(dbName)
+
+	// Load database metadata if it exists
+	metaPath := filepath.Join(dbDir, "db.meta.json")
+	if _, err := os.Stat(metaPath); err == nil {
+		var meta struct {
+			Name          string `json:"name"`
+			SchemaVersion int    `json:"schema_version"`
+		}
+		if err := sm.readJSON(metaPath, &meta); err == nil {
+			db.SchemaVersion = meta.SchemaVersion
+		}
+	}
+
+	// Default to version 1 if not set
+	if db.SchemaVersion == 0 {
+		db.SchemaVersion = 1
+	}
+
+	// Validate schema version compatibility
+	if db.SchemaVersion > CurrentSchemaVersion {
+		return nil, fmt.Errorf("database '%s' has schema version %d, but current version is %d. Please upgrade CachyDB to load this database",
+			dbName, db.SchemaVersion, CurrentSchemaVersion)
+	}
+
+	// Warn if database is older than current version
+	if db.SchemaVersion < CurrentSchemaVersion {
+		fmt.Printf("Warning: Database '%s' is at version %d, current version is %d. Run 'cachydb utils migrate --database %s' to upgrade.\n",
+			dbName, db.SchemaVersion, CurrentSchemaVersion, dbName)
+	}
 
 	// Load collections
 	entries, err := os.ReadDir(dbDir)

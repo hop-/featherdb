@@ -20,6 +20,8 @@ var appCmd = &cobra.Command{
 func init() {
 	// Flags for app command
 	setAllFlagsToCmd(appCmd)
+
+	rootCmd.AddCommand(appCmd)
 }
 
 func setAllFlagsToCmd(cmd *cobra.Command) {

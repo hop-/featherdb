@@ -55,9 +55,10 @@ type Collection struct {
 
 // Database represents the database
 type Database struct {
-	Name        string                 `json:"name"`
-	Collections map[string]*Collection `json:"collections"`
-	mu          sync.RWMutex
+	Name          string                 `json:"name"`
+	SchemaVersion int                    `json:"schema_version"` // Schema version for migrations
+	Collections   map[string]*Collection `json:"collections"`
+	mu            sync.RWMutex
 }
 
 // DatabaseManager manages multiple databases

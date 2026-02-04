@@ -2,12 +2,64 @@ package db
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
+	"sync"
 )
 
-// MigrationManager handles migration from JSON to binary storage
+// CurrentSchemaVersion is the latest schema version
+const CurrentSchemaVersion = 1
+
+// MigrationFunc is a function that migrates from one version to the next
+type MigrationFunc func(dbManager *DatabaseManager, storage *StorageManager) error
+
+// Example of registering a migration:
+//
+// func init() {
+//     // Migration from version 1 to version 2
+//     db.RegisterMigration(1, func(dbManager *db.DatabaseManager, storage *db.StorageManager) error {
+//         fmt.Println("Running migration 1 -> 2")
+//         // Iterate through all databases
+//         for _, database := range dbManager.Databases {
+//             // Perform migration operations on each database
+//             // Example: Add a new field, transform data, etc.
+//         }
+//         return nil
+//     })
+//
+//     // Migration from version 2 to version 3
+//     db.RegisterMigration(2, func(dbManager *db.DatabaseManager, storage *db.StorageManager) error {
+//         fmt.Println("Running migration 2 -> 3")
+//         // Perform version 2 to 3 migration
+//         return nil
+//     })
+// }
+
+// MigrationRegistry holds all registered migration functions
+type MigrationRegistry struct {
+	migrations map[int]MigrationFunc // maps from_version -> migration function to reach from_version+1
+	mu         sync.RWMutex
+}
+
+var globalRegistry = &MigrationRegistry{
+	migrations: make(map[int]MigrationFunc),
+}
+
+// RegisterMigration registers a migration function for a specific version transition
+// fromVersion -> toVersion (toVersion must be fromVersion + 1)
+func RegisterMigration(fromVersion int, migrationFunc MigrationFunc) {
+	globalRegistry.mu.Lock()
+	defer globalRegistry.mu.Unlock()
+	globalRegistry.migrations[fromVersion] = migrationFunc
+}
+
+// GetMigration retrieves a migration function for a specific version
+func GetMigration(fromVersion int) (MigrationFunc, bool) {
+	globalRegistry.mu.RLock()
+	defer globalRegistry.mu.RUnlock()
+	fn, exists := globalRegistry.migrations[fromVersion]
+	return fn, exists
+}
+
+// MigrationManager handles database schema migrations
 type MigrationManager struct {
 	storage *StorageManager
 }
@@ -19,241 +71,113 @@ func NewMigrationManager(storage *StorageManager) *MigrationManager {
 	}
 }
 
-// MigrateDatabase migrates a single database from JSON to binary format
-func (mm *MigrationManager) MigrateDatabase(dbName string) error {
-	fmt.Printf("Migrating database '%s' from JSON to binary format...\n", dbName)
+// MigrateDatabase migrates a database from its current version to the target version
+func (mm *MigrationManager) MigrateDatabase(dbName string, targetVersion int) error {
+	fmt.Printf("Starting migration for database '%s'...\n", dbName)
 
-	// Load database with JSON format
-	oldFormat := mm.storage.Format
-	mm.storage.Format = FormatJSON
+	// Load database
 	db, err := mm.storage.LoadDatabase(dbName)
 	if err != nil {
-		mm.storage.Format = oldFormat
 		return fmt.Errorf("failed to load database: %w", err)
 	}
 
-	// Switch to binary format and save
-	mm.storage.Format = FormatBinary
-	if err := mm.storage.SaveDatabase(db); err != nil {
-		mm.storage.Format = oldFormat
-		return fmt.Errorf("failed to save database in binary format: %w", err)
+	currentVersion := db.SchemaVersion
+	if currentVersion == 0 {
+		// Default to version 1 for databases without version info
+		currentVersion = 1
+		db.SchemaVersion = 1
 	}
 
-	mm.storage.Format = oldFormat
+	fmt.Printf("Database '%s' is at version %d, target version: %d\n", dbName, currentVersion, targetVersion)
 
-	fmt.Printf("Database '%s' migrated successfully\n", dbName)
+	if currentVersion == targetVersion {
+		fmt.Printf("Database '%s' is already at version %d, no migration needed\n", dbName, targetVersion)
+		return nil
+	}
+
+	if currentVersion > targetVersion {
+		return fmt.Errorf("cannot downgrade database from version %d to %d", currentVersion, targetVersion)
+	}
+
+	// Create a temporary DatabaseManager with just this database
+	dbManager := NewDatabaseManager()
+	dbManager.Databases[dbName] = db
+
+	// Apply migrations iteratively from currentVersion to targetVersion
+	for version := currentVersion; version < targetVersion; version++ {
+		fmt.Printf("Applying migration from version %d to %d...\n", version, version+1)
+
+		migrationFunc, exists := GetMigration(version)
+		if !exists {
+			return fmt.Errorf("no migration found from version %d to %d", version, version+1)
+		}
+
+		if err := migrationFunc(dbManager, mm.storage); err != nil {
+			return fmt.Errorf("migration from version %d to %d failed: %w", version, version+1, err)
+		}
+
+		// Update version
+		db.SchemaVersion = version + 1
+
+		// Save database with new version
+		if err := mm.storage.SaveDatabase(db); err != nil {
+			return fmt.Errorf("failed to save database after migration to version %d: %w", version+1, err)
+		}
+
+		fmt.Printf("Successfully migrated to version %d\n", version+1)
+	}
+
+	fmt.Printf("Database '%s' successfully migrated to version %d\n", dbName, targetVersion)
 	return nil
 }
 
-// MigrateCollection migrates a single collection from JSON to binary format
-func (mm *MigrationManager) MigrateCollection(dbName, collName string) error {
-	fmt.Printf("Migrating collection '%s/%s' from JSON to binary format...\n", dbName, collName)
+// MigrateAllDatabases migrates all databases to the target version
+func (mm *MigrationManager) MigrateAllDatabases(targetVersion int) error {
+	fmt.Printf("Starting migration of all databases to version %d...\n", targetVersion)
 
-	// Load collection with JSON format
-	oldFormat := mm.storage.Format
-	mm.storage.Format = FormatJSON
-	coll, err := mm.storage.LoadCollection(dbName, collName)
+	// Load all databases
+	dbManager, err := mm.storage.LoadAllDatabases()
 	if err != nil {
-		mm.storage.Format = oldFormat
-		return fmt.Errorf("failed to load collection: %w", err)
-	}
-
-	// Switch to binary format and save
-	mm.storage.Format = FormatBinary
-	if err := mm.storage.SaveCollection(dbName, coll); err != nil {
-		mm.storage.Format = oldFormat
-		return fmt.Errorf("failed to save collection in binary format: %w", err)
-	}
-
-	// Remove old JSON documents file
-	docsPath := filepath.Join(mm.storage.RootDir, dbName, collName, "documents.json")
-	if err := os.Remove(docsPath); err != nil && !os.IsNotExist(err) {
-		fmt.Printf("Warning: failed to remove old JSON file: %v\n", err)
-	}
-
-	mm.storage.Format = oldFormat
-
-	fmt.Printf("Collection '%s/%s' migrated successfully\n", dbName, collName)
-	return nil
-}
-
-// MigrateAllDatabases migrates all databases from JSON to binary format
-func (mm *MigrationManager) MigrateAllDatabases() error {
-	fmt.Println("Starting migration of all databases from JSON to binary format...")
-
-	// Find all database directories
-	entries, err := os.ReadDir(mm.storage.RootDir)
-	if err != nil {
-		return fmt.Errorf("failed to read root directory: %w", err)
+		return fmt.Errorf("failed to load databases: %w", err)
 	}
 
 	migratedCount := 0
-	for _, entry := range entries {
-		// Skip WAL files and non-directories
-		if !entry.IsDir() || strings.HasPrefix(entry.Name(), WALFilePrefix) {
-			continue
-		}
-
-		dbName := entry.Name()
-
-		// Check if database is already in binary format by looking for collection.data files
-		if mm.isDatabaseBinary(dbName) {
-			fmt.Printf("Database '%s' is already in binary format, skipping\n", dbName)
-			continue
-		}
-
-		if err := mm.MigrateDatabase(dbName); err != nil {
+	for dbName := range dbManager.Databases {
+		if err := mm.MigrateDatabase(dbName, targetVersion); err != nil {
 			return fmt.Errorf("failed to migrate database '%s': %w", dbName, err)
 		}
-
 		migratedCount++
 	}
 
-	fmt.Printf("\nMigration complete! Migrated %d database(s)\n", migratedCount)
+	fmt.Printf("Successfully migrated %d database(s) to version %d\n", migratedCount, targetVersion)
 	return nil
 }
 
-// isDatabaseBinary checks if a database is already using binary format
-func (mm *MigrationManager) isDatabaseBinary(dbName string) bool {
-	dbDir := filepath.Join(mm.storage.RootDir, dbName)
-
-	// Read collections
-	entries, err := os.ReadDir(dbDir)
-	if err != nil {
-		return false
-	}
-
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-
-		// Check if collection.data exists (binary format)
-		dataPath := filepath.Join(dbDir, entry.Name(), "collection.data")
-		if _, err := os.Stat(dataPath); err == nil {
-			return true
-		}
-
-		// Check if documents.json exists (JSON format)
-		jsonPath := filepath.Join(dbDir, entry.Name(), "documents.json")
-		if _, err := os.Stat(jsonPath); err == nil {
-			return false
-		}
-	}
-
-	// If no collections, consider it not binary (will be created as binary)
-	return false
-}
-
-// VerifyMigration verifies that the migration was successful
-func (mm *MigrationManager) VerifyMigration(dbName string) error {
-	fmt.Printf("Verifying migration of database '%s'...\n", dbName)
-
-	// Load database with binary format
-	oldFormat := mm.storage.Format
-	mm.storage.Format = FormatBinary
+// GetDatabaseVersion returns the schema version of a database
+func (mm *MigrationManager) GetDatabaseVersion(dbName string) (int, error) {
 	db, err := mm.storage.LoadDatabase(dbName)
 	if err != nil {
-		mm.storage.Format = oldFormat
-		return fmt.Errorf("failed to load database in binary format: %w", err)
-	}
-	mm.storage.Format = oldFormat
-
-	// Count documents
-	totalDocs := 0
-	for _, coll := range db.Collections {
-		docCount := len(coll.Documents)
-		totalDocs += docCount
-		fmt.Printf("  Collection '%s': %d documents\n", coll.Name, docCount)
+		return 0, fmt.Errorf("failed to load database: %w", err)
 	}
 
-	fmt.Printf("Database '%s' verification complete: %d collections, %d total documents\n",
-		dbName, len(db.Collections), totalDocs)
-	return nil
+	version := db.SchemaVersion
+	if version == 0 {
+		// Default to version 1 for databases without version info
+		version = 1
+	}
+
+	return version, nil
 }
 
-// CreateBackup creates a backup of the database before migration
-func (mm *MigrationManager) CreateBackup(dbName string) error {
-	dbDir := filepath.Join(mm.storage.RootDir, dbName)
-	backupDir := filepath.Join(mm.storage.RootDir, dbName+".backup")
+// ListMigrations returns a list of all registered migrations
+func (mm *MigrationManager) ListMigrations() []int {
+	globalRegistry.mu.RLock()
+	defer globalRegistry.mu.RUnlock()
 
-	fmt.Printf("Creating backup of database '%s'...\n", dbName)
-
-	// Check if backup already exists
-	if _, err := os.Stat(backupDir); err == nil {
-		return fmt.Errorf("backup directory already exists: %s", backupDir)
+	versions := make([]int, 0, len(globalRegistry.migrations))
+	for version := range globalRegistry.migrations {
+		versions = append(versions, version)
 	}
 
-	// Copy directory recursively
-	if err := copyDir(dbDir, backupDir); err != nil {
-		return fmt.Errorf("failed to create backup: %w", err)
-	}
-
-	fmt.Printf("Backup created at: %s\n", backupDir)
-	return nil
-}
-
-// RestoreBackup restores a database from backup
-func (mm *MigrationManager) RestoreBackup(dbName string) error {
-	dbDir := filepath.Join(mm.storage.RootDir, dbName)
-	backupDir := filepath.Join(mm.storage.RootDir, dbName+".backup")
-
-	fmt.Printf("Restoring database '%s' from backup...\n", dbName)
-
-	// Check if backup exists
-	if _, err := os.Stat(backupDir); os.IsNotExist(err) {
-		return fmt.Errorf("backup directory does not exist: %s", backupDir)
-	}
-
-	// Remove current database
-	if err := os.RemoveAll(dbDir); err != nil {
-		return fmt.Errorf("failed to remove current database: %w", err)
-	}
-
-	// Restore from backup
-	if err := copyDir(backupDir, dbDir); err != nil {
-		return fmt.Errorf("failed to restore from backup: %w", err)
-	}
-
-	fmt.Printf("Database '%s' restored from backup\n", dbName)
-	return nil
-}
-
-// copyDir recursively copies a directory
-func copyDir(src, dst string) error {
-	entries, err := os.ReadDir(src)
-	if err != nil {
-		return err
-	}
-
-	if err := os.MkdirAll(dst, 0755); err != nil {
-		return err
-	}
-
-	for _, entry := range entries {
-		srcPath := filepath.Join(src, entry.Name())
-		dstPath := filepath.Join(dst, entry.Name())
-
-		if entry.IsDir() {
-			if err := copyDir(srcPath, dstPath); err != nil {
-				return err
-			}
-		} else {
-			if err := copyFile(srcPath, dstPath); err != nil {
-				return err
-			}
-		}
-	}
-
-	return nil
-}
-
-// copyFile copies a single file
-func copyFile(src, dst string) error {
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return err
-	}
-
-	return os.WriteFile(dst, data, 0644)
+	return versions
 }
