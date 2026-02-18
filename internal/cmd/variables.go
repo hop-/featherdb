@@ -5,4 +5,5 @@ var (
 	defaultVersion    = "v0.0.0-dev"
 	generalRootDir    string
 	generalServerPort int
+	generalTransport  string
 )

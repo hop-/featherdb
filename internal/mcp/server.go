@@ -3,6 +3,9 @@ package mcpserver
 import (
 	"context"
 	"fmt"
+	"log"
+	"net/http"
+	"time"
 
 	"github.com/hop-/cachydb/pkg/db"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -14,10 +17,12 @@ type Server struct {
 	storage       *db.StorageManager
 	server        *mcp.Server
 	defaultDBName string
+	transport     string
+	httpAddr      string
 }
 
 // NewServer creates a new MCP server
-func NewServer(defaultDBName, rootDir string) (*Server, error) {
+func NewServer(defaultDBName, rootDir, transport, httpAddr string) (*Server, error) {
 	storage, err := db.NewStorageManager(rootDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create storage manager: %w", err)
@@ -44,6 +49,8 @@ func NewServer(defaultDBName, rootDir string) (*Server, error) {
 		dbManager:     dbManager,
 		storage:       storage,
 		defaultDBName: defaultDBName,
+		transport:     transport,
+		httpAddr:      httpAddr,
 	}
 
 	// Create MCP server with implementation info
@@ -59,9 +66,54 @@ func NewServer(defaultDBName, rootDir string) (*Server, error) {
 	return s, nil
 }
 
-// Start starts the MCP server using stdio transport
+// Start starts the MCP server using the configured transport.
 func (s *Server) Start(ctx context.Context) error {
+	switch s.transport {
+	case "http":
+		return s.startHTTP(ctx)
+	default:
+		return s.startStdio(ctx)
+	}
+}
+
+// startStdio starts the MCP server using the stdio transport.
+func (s *Server) startStdio(ctx context.Context) error {
 	return s.server.Run(ctx, &mcp.StdioTransport{})
+}
+
+// startHTTP starts the MCP server using the Streamable HTTP transport (MCP spec 2025-03-26+).
+// It exposes an HTTP endpoint at /mcp that clients can connect to via SSE.
+func (s *Server) startHTTP(ctx context.Context) error {
+	handler := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
+		return s.server
+	}, nil)
+
+	mux := http.NewServeMux()
+	mux.Handle("/mcp", handler)
+
+	httpServer := &http.Server{
+		Addr:    s.httpAddr,
+		Handler: mux,
+	}
+
+	// Gracefully shut down when context is cancelled
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		httpServer.Shutdown(shutdownCtx) //nolint:errcheck
+	}()
+
+	addr := s.httpAddr
+	if len(addr) > 0 && addr[0] == ':' {
+		addr = "localhost" + addr
+	}
+	log.Printf("CachyDB MCP server listening on http://%s/mcp (Streamable HTTP transport)\n", addr)
+
+	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		return fmt.Errorf("HTTP server error: %w", err)
+	}
+	return nil
 }
 
 // registerTools registers all MCP tools

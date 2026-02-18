@@ -37,6 +37,12 @@ func setAllFlagsToCmd(cmd *cobra.Command) {
 		config.GetConfig().RootDir,
 		"root directory for application data and configurations",
 	)
+	cmd.Flags().StringVarP(
+		&generalTransport,
+		"transport", "t",
+		"",
+		"transport type: stdio or http",
+	)
 }
 
 func executeApp() {
@@ -62,7 +68,11 @@ func executeApp() {
 }
 
 func buildApp() (*app.App, error) {
-	builder := app.NewBuilder()
+	builder := app.NewBuilder().
+		WithDBName(config.GetConfig().DBName).
+		WithRootDir(generalRootDir).
+		WithTransport(generalTransport).
+		WithPort(generalServerPort)
 
 	return builder.Build()
 }

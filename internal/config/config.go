@@ -12,6 +12,7 @@ type Config struct {
 	RootDir     string `env:"ROOT_DIR" default:""`
 	RootDirName string `default:".cachydb"`
 	DBName      string `env:"DB_NAME" default:"main"`
+	Transport   string `env:"TRANSPORT" default:"stdio"`
 }
 
 var cfg Config

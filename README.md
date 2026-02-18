@@ -9,7 +9,7 @@ A lightweight document-based database with Model Context Protocol (MCP) support,
 - **Schema validation**: Define and enforce schemas for your collections
 - **Indexing**: Automatic ID indexing plus custom hash-based indexes on any field
 - **Query operations**: Find documents with filters (eq, ne, gt, lt, gte, lte, in)
-- **MCP integration**: Built-in MCP server for seamless AI assistant integration
+- **MCP integration**: Built-in MCP server supporting stdio and Streamable HTTP transports
 - **Binary storage**: High-performance binary format with gzip compression
 - **Write-Ahead Log (WAL)**: Crash recovery and durability guarantees
 - **Persisted indexes**: Fast startup with indexes saved to disk
@@ -43,23 +43,50 @@ go install github.com/hop-/cachydb@latest
 
 ### Starting the MCP Server
 
+#### stdio (default)
+
 ```bash
 ./cachydb
 ```
 
-The server runs in stdio mode for MCP communication.
+The server communicates over stdin/stdout — suitable for local MCP clients such as Claude Desktop.
+
+#### HTTP (Streamable HTTP transport)
+
+```bash
+./cachydb --transport http
+```
+
+The server listens on `http://localhost:7601/mcp` and implements the [MCP Streamable HTTP transport](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports). This is the recommended transport for networked or multi-client deployments.
+
+Change the port with `--port`:
+
+```bash
+./cachydb --transport http --port 8080
+```
 
 ### Configuration
 
 Environment variables:
 
-- `DB_NAME`: Database name (default: "main")
-- `ROOT_DIR`: Data directory (default: "~/.cachydb")
-- `PORT`: Port number (default: 7601)
+- `DB_NAME`: Database name (default: `main`)
+- `ROOT_DIR`: Data directory (default: `~/.cachydb`)
+- `PORT`: Port number for HTTP transport (default: `7601`)
+- `TRANSPORT`: Transport type — `stdio` or `http` (default: `stdio`)
+
+CLI flags (override environment variables):
+
+```none
+  -t, --transport   Transport type: stdio or http
+  -p, --port        Port for HTTP transport
+  -R, --root        Root data directory
+```
 
 ### MCP Configuration
 
-Add to your MCP settings (e.g., Claude Desktop config):
+#### stdio transport
+
+Add to your MCP client settings (e.g. Claude Desktop `claude_desktop_config.json`):
 
 ```json
 {
@@ -75,6 +102,28 @@ Add to your MCP settings (e.g., Claude Desktop config):
   }
 }
 ```
+
+#### HTTP transport
+
+Start the server first:
+
+```bash
+./cachydb --transport http --port 7601
+```
+
+Then point your MCP client at the endpoint:
+
+```json
+{
+  "mcpServers": {
+    "cachydb": {
+      "url": "http://localhost:7601/mcp"
+    }
+  }
+}
+```
+
+The HTTP endpoint implements the MCP Streamable HTTP transport — clients POST JSON-RPC messages to `/mcp` and receive responses via SSE.
 
 ## MCP Tools
 
@@ -359,6 +408,7 @@ If you have existing databases in JSON format, you can migrate them to the new b
 ```
 
 This will:
+
 1. Create a backup (`.backup` directory)
 2. Load data from JSON format
 3. Save to binary format with compression
@@ -387,24 +437,6 @@ This will:
 ```bash
 ./cachydb migrate --database mydb --restore
 ```
-
-## Storage Format
-
-Legacy data is stored in JSON format (for backward compatibility):
-
-```none
-.cachydb/
-└── main/                      # Database name
-    ├── db.meta.json          # Database metadata
-    ├── users/                # Collection (JSON format - legacy)
-    │   ├── collection.meta.json  # Schema & indexes
-    │   └── documents.json    # All documents
-    └── posts/                # Another collection
-        ├── collection.meta.json
-        └── documents.json
-```
-
-New databases automatically use the binary format.
 
 ## Examples
 
@@ -479,4 +511,5 @@ Built with:
 - **Go 1.25+** - Programming language
 - **Official MCP Go SDK** - [`github.com/modelcontextprotocol/go-sdk`](https://github.com/modelcontextprotocol/go-sdk)
 - Type-safe tool handlers with automatic JSON schema generation
-- Standard stdio transport for MCP communication
+- **stdio transport** — for local MCP clients
+- **Streamable HTTP transport** — MCP spec 2025-03-26+, SSE-based, suitable for networked deployments
